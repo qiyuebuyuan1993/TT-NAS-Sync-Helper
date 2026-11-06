@@ -1,0 +1,11 @@
+{
+  "display_name": "NAS 同步助手",
+  "loading_order": 100,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "TT-NAS-Sync-Helper contributors",
+  "version": "0.1.0",
+  "auto_update": false
+}

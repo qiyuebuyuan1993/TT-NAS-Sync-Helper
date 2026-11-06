@@ -1,4 +1,5 @@
 import { hostKind, startupAllowed, makeOptions, completed } from './core.js';
+import { ensureQuickReply, SYNC_COMMAND } from './shortcuts.js';
 
 const KEY = 'tt-nas-sync-helper:v1';
 const ATTEMPT = `${KEY}:startup-attempted`;
@@ -14,6 +15,7 @@ let statusNode;
 let root;
 let selected;
 let lastUploadThisSession = 0;
+let panelOpening = false;
 const save = () => localStorage.setItem(KEY, JSON.stringify(config));
 const status = text => { if (statusNode) statusNode.textContent = text; };
 const stamp = time => time ? new Date(time).toLocaleString() : '尚未通过本插件上传';
@@ -54,8 +56,42 @@ async function connect() {
 
 async function panel() {
     if (busy) { status('同步进行中，请等待完成。'); return; }
-    await (await connect()).openSyncPopup();
-    if (selected) await refreshServers();
+    if (panelOpening) return;
+    panelOpening = true;
+    try {
+        await (await connect()).openSyncPopup();
+        if (selected) await refreshServers();
+    } finally { panelOpening = false; }
+}
+
+async function installShortcuts() {
+    const menu = document.getElementById('extensionsMenu');
+    if (menu && !document.getElementById(`${ROOT}-menu`)) {
+        const entry = button('NAS 同步', panel, menu);
+        entry.id = `${ROOT}-menu`;
+        entry.className = 'list-group-item flex-container flexGap5';
+        entry.title = '打开 TT 原生同步面板';
+    }
+    const [{ SlashCommandParser }, { SlashCommand }] = await Promise.all([
+        import('/scripts/slash-commands/SlashCommandParser.js'),
+        import('/scripts/slash-commands/SlashCommand.js'),
+    ]);
+    SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+        name: SYNC_COMMAND, callback: async () => { await panel(); return ''; },
+        helpString: '打开 TT 原生同步面板，不直接上传或下载。',
+    }));
+    const installQR = async (attempt = 0) => {
+        try {
+            if (await ensureQuickReply(window.quickReplyApi)) return;
+            if (attempt < 20) setTimeout(() => void installQR(attempt + 1), 500);
+            else status('快速回复尚未就绪，可点击“添加快速回复按钮”重试；魔法棒入口可直接使用。');
+        } catch (error) { status(`快速回复安装失败：${String(error?.message || error)}`); }
+    };
+    button('添加快速回复按钮', async () => {
+        if (!await ensureQuickReply(window.quickReplyApi)) throw new Error('请先启用 TT 快速回复扩展。');
+        status('已添加 NAS 同步快速回复；若未显示，请在快速回复设置中开启按钮显示。');
+    });
+    void installQR();
 }
 
 async function refreshServers() {
@@ -108,10 +144,16 @@ async function transfer(direction, automatic = false) {
 async function closeReminder(reason) {
     if (reason !== 'tauri:exit-requested') return;
     if (busy) { status('同步尚未结束，请完成后再退出。'); throw new Error('NAS sync is running'); }
-    const choices = [['cancel', '返回 TT，先上传'], ['exit', '直接退出，保留未交接提醒']];
+    const choices = [['sync', '返回 TT，打开同步'], ['exit', '直接退出，保留未交接提醒']];
     if (lastUploadThisSession) choices.push(['done', '确认上传后未再修改，退出']);
     const result = await choose(`离开前请确认最新聊天和千千结记忆已经上传。最近一次通过本插件上传：${stamp(config.lastUpload)}。插件无法判断所有扩展是否又写入了新内容。`, choices);
-    if (result === 'cancel') { status('请点击“上传到 NAS”，完成后再退出。'); throw new Error('User stayed to upload'); }
+    if (result === 'sync' || result === 'cancel') {
+        if (result === 'sync') {
+            // Let the rejected exit flush unwind before opening a panel that can initiate another flush.
+            setTimeout(() => void panel().catch(error => status(`无法打开同步面板：${String(error?.message || error)}`)), 0);
+        }
+        throw new Error('User stayed to upload');
+    }
     config.pending = result !== 'done'; save();
 }
 
@@ -126,6 +168,7 @@ async function start() {
     const actions = root.querySelector('.tt-nas-actions');
     button('打开同步面板', panel, actions);
     const kind = hostKind(window.__TAURITAVERN_HOST__);
+    if (kind !== 'unknown') void installShortcuts().catch(error => status(`快捷入口初始化失败：${String(error?.message || error)}`));
     if (kind !== 'desktop') { status(kind === 'mobile' ? '手机模式：先连接节点小宝，再打开同步面板。' : '本插件仅支持 TauriTavern；请使用原生同步入口。'); return; }
     selected = document.createElement('select'); selected.setAttribute('aria-label', 'NAS 同步目标'); root.insertBefore(selected, actions);
     selected.addEventListener('change', () => { config.serverId = selected.value; config.autoDownload = false; auto.checked = false; save(); status('目标已保存。启动下载需在本机单独开启。'); });

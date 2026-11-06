@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {readFile} from 'node:fs/promises';
 import * as core from './core.js';
+import * as shortcuts from './shortcuts.js';
 
 const source = await readFile(new URL('./index.js', import.meta.url), 'utf8');
 const key = 'tt-nas-sync-helper:v1';
@@ -26,9 +27,10 @@ async function harness({kind = 'desktop', config = {}, session = {}, fail = fals
         remove() { this.removed = true; }
     }
     const container = new Element('container');
+    const menu = new Element('menu');
     const document = {
         readyState: 'complete', body: new Element('body'),
-        getElementById: id => id === 'extensions_settings2' ? container : nodes.find(node => node.id === id),
+        getElementById: id => id === 'extensions_settings2' ? container : id === 'extensionsMenu' ? menu : nodes.find(node => node.id === id),
         createElement: tag => new Element(tag),
     };
     const storage = new Map([[key, JSON.stringify(config)]]);
@@ -36,6 +38,7 @@ async function harness({kind = 'desktop', config = {}, session = {}, fail = fals
     const storageAPI = map => ({getItem: key => map.get(key) ?? null, setItem: (key, value) => map.set(key, value)});
     const calls = [];
     let lifecycle;
+    let slashCommand;
     const native = {
         invoke: async (command, args) => {
             calls.push([command,args]);
@@ -53,29 +56,33 @@ async function harness({kind = 'desktop', config = {}, session = {}, fail = fals
         showSyncReportResult: async report => calls.push(['report',report]),
         flushLifecycleState: async reason => { calls.push(['flush',reason]); await lifecycle?.(reason); },
         registerLifecycleFlushHandler: (name, fn) => { lifecycle = fn; },
+        SlashCommandParser: {addCommandObject: command => { slashCommand = command; }},
+        SlashCommand: {fromProps: props => props},
     };
-    const context = vm.createContext({console, document, Option: class {constructor(text,value){this.text=text;this.value=value;}},
-        window:{__TAURITAVERN_HOST__:{kind}}, localStorage:storageAPI(storage), sessionStorage:storageAPI(sessionMap)});
+    const qr = { getSetByName: () => ({qrList:[{message:'/tt-nas-sync'}]}), listGlobalSets: () => ['TT-NAS-Sync-Helper'] };
+    const context = vm.createContext({console, document, setTimeout, Option: class {constructor(text,value){this.text=text;this.value=value;}},
+        window:{__TAURITAVERN_HOST__:{kind},quickReplyApi:qr}, localStorage:storageAPI(storage), sessionStorage:storageAPI(sessionMap)});
     const moduleFor = async obj => {
         const module = new vm.SyntheticModule(Object.keys(obj), function(){for(const [key,value] of Object.entries(obj)) this.setExport(key,value);}, {context});
         await module.link(() => {}); await module.evaluate(); return module;
     };
     const nativeModule = await moduleFor(native);
     const rootModule = new vm.SourceTextModule(source, {context, importModuleDynamically: async () => nativeModule});
-    await rootModule.link(() => moduleFor(core)); await rootModule.evaluate(); await tick();
+    await rootModule.link(spec => moduleFor(spec === './shortcuts.js' ? shortcuts : core)); await rootModule.evaluate(); await tick();
     const click = async text => {
         const node = nodes.findLast(node => node.tag === 'button' && node.textContent === text);
         assert.ok(node, `button ${text}`); assert.ok(!node.disabled);
         node.events.click(); await tick();
     };
     return {calls, nodes, storage, sessionMap, click, close: reason => lifecycle(reason),
+        slash: () => slashCommand.callback(),
         config: () => JSON.parse(storage.get(key))};
 }
 
 test('mobile only opens native panel and never registers desktop automation', async () => {
     const h = await harness({kind:'mobile',config:{serverId:'nas',autoDownload:true}});
     assert.deepEqual(h.calls, []);
-    assert.equal(h.nodes.filter(node => node.tag === 'button').length, 1);
+    assert.ok(!h.nodes.some(node => node.textContent === '上传到 NAS'));
     await h.click('打开同步面板');
     assert.deepEqual(h.calls, [['panel']]);
 });
@@ -112,11 +119,21 @@ test('close cancellation keeps app open; only explicit handoff clears pending', 
     assert.equal(h.nodes.some(node => node.tag === 'dialog'), false);
     const closing = h.close('tauri:exit-requested');
     const rejection = assert.rejects(closing, /stayed/);
-    await h.click('返回 TT，先上传'); await rejection;
+    await h.click('返回 TT，打开同步'); await rejection;
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok(h.calls.some(call => call[0] === 'panel'));
     assert.equal(h.config().pending, true);
     await h.click('上传到 NAS');
     assert.ok(h.config().lastUpload > 0);
     const nextClose = h.close('tauri:exit-requested');
     await h.click('确认上传后未再修改，退出'); await nextClose;
     assert.equal(h.config().pending, false);
+});
+
+test('wand and slash/QR command both open the panel without syncing', async () => {
+    const h = await harness({kind:'mobile'});
+    await h.click('NAS 同步');
+    assert.equal(await h.slash(), '');
+    assert.equal(h.calls.filter(call => call[0] === 'panel').length, 2);
+    assert.ok(!h.calls.some(call => /^tt_sync_(push|pull)$/.test(call[0])));
 });

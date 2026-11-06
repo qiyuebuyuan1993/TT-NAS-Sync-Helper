@@ -153,7 +153,8 @@ async function start() {
 
 // Extension loader runs after TT initializes its host; DOM ready covers deferred loading.
 const ready = document.readyState === 'loading' ? new Promise(resolve => document.addEventListener('DOMContentLoaded', resolve, {once:true})) : Promise.resolve();
-void ready.then(start).catch(error => {
+void ready.then(() => window.__TAURITAVERN__?.ready ?? window.__TAURITAVERN_MAIN_READY__)
+    .then(start).catch(error => {
     console.error('[NAS Sync Helper]', error);
     status(`插件初始化失败：${String(error?.message || error)}。请使用 TT 原生同步面板。`);
 });
